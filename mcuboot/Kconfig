@@ -1,0 +1,2 @@
+# MCUboot Kconfig entry point
+source "${ZEPHYR_MCUBOOT_MODULE_DIR}/boot/zephyr/Kconfig"

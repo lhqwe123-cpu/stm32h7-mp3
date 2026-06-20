@@ -1,0 +1,413 @@
+/*
+ * Copyright (c) 2026
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/**
+ * @file lvgl_uart_ota.c
+ * @brief ���� OTA ���� LVGL ����ʵ��
+ *
+ * �ṩ���� OTA ���������� UI �������̣�
+ * 1. ��ʾ�ȴ����ӽ���
+ * 2. ��̨���� OTA �����߳�
+ * 3. ʵʱ��ʾ���ս���
+ * 4. ��ʾ������� (�ɹ�/ʧ��)
+ * 5. �ɹ����Զ�����
+ */
+
+#include "lvgl_uart_ota.h"
+#include "uart_ota_server.h"
+#include "lvgl_sd_pic.h"
+#include "mcuboot_upgrade.h"
+
+#include <zephyr/kernel.h>
+#include <zephyr/logging/log.h>
+#include <zephyr/sys/reboot.h>
+#include <zephyr/sys/printk.h>
+#include <zephyr/dfu/mcuboot.h>
+
+#include "lvgl.h"
+#include <string.h>
+#include <stdio.h>
+
+LOG_MODULE_REGISTER(lvgl_uota, LOG_LEVEL_INF);
+
+/* ============================================================
+ * �ڲ�״̬
+ * ============================================================ */
+
+static lv_obj_t *g_uota_scr = NULL;
+static lv_obj_t *g_uota_status = NULL;
+static lv_obj_t *g_uota_progress = NULL;
+static lv_obj_t *g_uota_info_label = NULL;
+static lv_obj_t *g_uota_back_btn = NULL;
+
+static uota_server_t g_uota_server;
+static bool g_uota_active = false;
+static bool g_uota_complete = false;
+static bool g_uota_failed = false;
+static bool g_uota_ui_finalized = false; /* 防止重复创建终态UI */
+
+/* OTA �����߳� */
+static struct k_thread g_uota_thread_data;
+static K_THREAD_STACK_DEFINE(g_uota_thread_stack, 8192);
+
+/* ���̹߳�����״̬ */
+static volatile uota_state_t g_uota_state = UOTA_STATE_IDLE;
+static volatile uint8_t g_uota_progress_val = 0;
+static volatile bool g_uota_done = false;
+static volatile int g_uota_error_code = 0;
+static char g_uota_error_msg[128];
+
+/* �������˵��ص� */
+static lv_event_cb_t g_uota_back_to_menu_cb = NULL;
+
+/* Back button handler - abort OTA and return */
+static void on_uota_back_click(lv_event_t *e)
+{
+    /* Abort OTA transfer (async, don't block UI thread) */
+    if (g_uota_active)
+    {
+        uota_server_abort(&g_uota_server);
+        g_uota_active = false;
+    }
+    /* Delete current screen */
+    if (g_uota_scr != NULL)
+    {
+        lv_obj_del(g_uota_scr);
+        g_uota_scr = NULL;
+    }
+    /* Call back to menu callback */
+    if (g_uota_back_to_menu_cb)
+    {
+        g_uota_back_to_menu_cb(NULL);
+    }
+}
+
+/* ȷ��������ť�ص� */
+static void on_uota_confirm_click(lv_event_t *e)
+{
+    int ret = boot_request_upgrade(BOOT_UPGRADE_TEST);
+    if (ret == 0)
+    {
+        LOG_INF("MCUboot upgrade requested, rebooting...");
+        printk("MCUboot upgrade requested, rebooting...\n");
+        lv_label_set_text(g_uota_status, "Upgrade requested!\nRebooting...");
+        lv_task_handler();
+        k_sleep(K_SECONDS(2));
+        sys_reboot(SYS_REBOOT_COLD);
+    }
+    else
+    {
+        LOG_ERR("boot_request_upgrade failed: %d", ret);
+        printk("boot_request_upgrade failed: %d\n", ret);
+        lv_label_set_text(g_uota_status, "Confirm failed!\nPlease retry.");
+    }
+}
+
+/* ============================================================
+ * �ص�����
+ * ============================================================ */
+
+static void uota_state_callback(uota_state_t state, void *user_data)
+{
+    g_uota_state = state;
+    LOG_INF("OTA state changed: %s", uota_state_str(state));
+}
+
+static void uota_progress_callback(uint8_t progress, void *user_data)
+{
+    g_uota_progress_val = progress;
+}
+
+static void uota_error_callback(int error_code, const char *msg,
+                                void *user_data)
+{
+    g_uota_error_code = error_code;
+    if (msg)
+    {
+        strncpy(g_uota_error_msg, msg, sizeof(g_uota_error_msg) - 1);
+    }
+    LOG_ERR("OTA error: %d - %s", error_code, msg ? msg : "unknown");
+}
+
+/* ============================================================
+ * OTA �����߳�
+ * ============================================================ */
+
+static void uota_thread_entry(void *arg1, void *arg2, void *arg3)
+{
+    int ret;
+
+    LOG_INF("UART OTA thread started");
+
+    ret = uota_server_start(&g_uota_server);
+
+    if (ret == 0)
+    {
+        LOG_INF("UART OTA completed successfully");
+        g_uota_complete = true;
+    }
+    else if (g_uota_server.state == UOTA_STATE_ABORTED)
+    {
+        LOG_INF("UART OTA aborted by user");
+        g_uota_failed = true;
+    }
+    else
+    {
+        LOG_ERR("UART OTA failed: %d", ret);
+        g_uota_failed = true;
+    }
+
+    g_uota_done = true;
+}
+
+/* ============================================================
+ * UI ˢ��
+ * ============================================================ */
+
+static void uota_progress_ui_refresh(void)
+{
+    char buf[128];
+    uota_state_t state = g_uota_state;
+    uint8_t progress = g_uota_progress_val;
+
+    /* 如果已经显示终态UI，不再重复刷新 */
+    if (g_uota_ui_finalized)
+    {
+        return;
+    }
+
+    switch (state)
+    {
+    case UOTA_STATE_IDLE:
+        lv_label_set_text(g_uota_status, "Initializing...");
+        lv_bar_set_value(g_uota_progress, 0, LV_ANIM_OFF);
+        break;
+
+    case UOTA_STATE_WAIT_SYNC:
+        lv_label_set_text(g_uota_status,
+                          "Waiting for connection...\n"
+                          "Connect UART and send firmware\n"
+                          "USART3: PB10-TX, PB11-RX");
+        lv_bar_set_value(g_uota_progress, 0, LV_ANIM_OFF);
+        break;
+
+    case UOTA_STATE_RECEIVING:
+        snprintf(buf, sizeof(buf), "Receiving firmware... %u%%", progress);
+        lv_label_set_text(g_uota_status, buf);
+        lv_bar_set_value(g_uota_progress, progress, LV_ANIM_ON);
+        break;
+
+    case UOTA_STATE_VERIFYING:
+        lv_label_set_text(g_uota_status, "Verifying firmware...");
+        lv_bar_set_value(g_uota_progress, 98, LV_ANIM_ON);
+        break;
+
+    case UOTA_STATE_COMPLETE:
+        g_uota_ui_finalized = true;
+        lv_label_set_text(g_uota_status,
+                          "Upgrade Complete!\n"
+                          "Rebooting in 3 seconds...");
+        lv_bar_set_value(g_uota_progress, 100, LV_ANIM_ON);
+        LOG_INF("=== UART OTA complete, rebooting in 3s ===");
+        printk("=== UART OTA complete, rebooting in 3s ===\n");
+        lv_task_handler();
+        k_sleep(K_SECONDS(1));
+        lv_label_set_text(g_uota_status,
+                          "Upgrade Complete!\n"
+                          "Rebooting in 2 seconds...");
+        lv_task_handler();
+        k_sleep(K_SECONDS(1));
+        lv_label_set_text(g_uota_status,
+                          "Upgrade Complete!\n"
+                          "Rebooting now...");
+        lv_task_handler();
+        k_sleep(K_SECONDS(1));
+        sys_reboot(SYS_REBOOT_COLD);
+        break;
+
+    case UOTA_STATE_FAILED:
+    case UOTA_STATE_ABORTED:
+        g_uota_ui_finalized = true;
+        snprintf(buf, sizeof(buf), "Upgrade FAILED!\nErr: %d - %.80s",
+                 g_uota_error_code,
+                 g_uota_error_msg[0] ? g_uota_error_msg : "Unknown");
+        lv_label_set_text(g_uota_status, buf);
+        lv_bar_set_value(g_uota_progress, 0, LV_ANIM_OFF);
+
+        /* 显示返回按钮 */
+        {
+            lv_obj_t *back_btn = lv_btn_create(g_uota_scr);
+            lv_obj_set_size(back_btn, 100, 40);
+            lv_obj_align(back_btn, LV_ALIGN_BOTTOM_LEFT, 10, -10);
+            lv_obj_add_event_cb(back_btn, on_uota_back_click, LV_EVENT_CLICKED, NULL);
+            lv_obj_t *back_lbl = lv_label_create(back_btn);
+            lv_label_set_text(back_lbl, "Back");
+            lv_obj_center(back_lbl);
+        }
+        g_uota_active = false;
+        break;
+
+    default:
+        break;
+    }
+}
+
+/* ============================================================
+ * ���湹��
+ * ============================================================ */
+
+static void show_uota_screen(void)
+{
+    lv_obj_clean(g_uota_scr);
+    lv_obj_set_style_bg_color(g_uota_scr, lv_color_hex(0x101020), 0);
+    lv_obj_set_style_pad_all(g_uota_scr, 0, 0);
+
+    /* ����ͼƬ */
+    const lv_img_dsc_t *bg_img = lvgl_sd_pic_get_image();
+    if (bg_img != NULL && bg_img->data != NULL)
+    {
+        lv_obj_t *bg = lv_img_create(g_uota_scr);
+        lv_img_set_src(bg, bg_img);
+        lv_obj_set_size(bg, LV_PCT(100), LV_PCT(100));
+        lv_obj_align(bg, LV_ALIGN_CENTER, 0, 0);
+        lv_obj_set_style_img_opa(bg, LV_OPA_30, 0);
+        lv_obj_move_to_index(bg, 0);
+    }
+
+    /* ���� */
+    lv_obj_t *title = lv_label_create(g_uota_scr);
+    lv_label_set_text(title, "UART OTA Upgrade");
+    lv_obj_set_style_text_color(title, lv_color_white(), 0);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 10);
+
+    /* ��Ϣ��ǩ */
+    g_uota_info_label = lv_label_create(g_uota_scr);
+    lv_label_set_text(g_uota_info_label,
+                      "Connect UART and send .fwpkg file\n"
+                      "Baudrate: 115200");
+    lv_obj_set_style_text_color(g_uota_info_label, lv_color_white(), 0);
+    lv_obj_align(g_uota_info_label, LV_ALIGN_TOP_MID, 0, 50);
+
+    /* ״̬ */
+    g_uota_status = lv_label_create(g_uota_scr);
+    lv_label_set_text(g_uota_status, "Waiting for connection...");
+    lv_obj_set_style_text_color(g_uota_status, lv_color_white(), 0);
+    lv_obj_align(g_uota_status, LV_ALIGN_CENTER, 0, -20);
+
+    /* ������ */
+    g_uota_progress = lv_bar_create(g_uota_scr);
+    lv_obj_set_size(g_uota_progress, 300, 20);
+    lv_bar_set_range(g_uota_progress, 0, 100);
+    lv_bar_set_value(g_uota_progress, 0, LV_ANIM_OFF);
+    lv_obj_align(g_uota_progress, LV_ALIGN_CENTER, 0, 10);
+
+    /* ���ذ�ť */
+    g_uota_back_btn = lv_btn_create(g_uota_scr);
+    lv_obj_set_size(g_uota_back_btn, 80, 35);
+    lv_obj_align(g_uota_back_btn, LV_ALIGN_BOTTOM_LEFT, 10, -10);
+    lv_obj_add_event_cb(g_uota_back_btn, on_uota_back_click, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *back_lbl = lv_label_create(g_uota_back_btn);
+    lv_label_set_text(back_lbl, "Back");
+    lv_obj_center(back_lbl);
+
+    lv_task_handler();
+}
+
+/* ============================================================
+ * �����ӿ�
+ * ============================================================ */
+
+int lvgl_uart_ota_start(void)
+{
+    int ret;
+
+    /* �����룺����Ѿ� active������ֹ */
+    if (g_uota_active)
+    {
+        LOG_WRN("UART OTA already active, aborting previous");
+        uota_server_abort(&g_uota_server);
+        g_uota_active = false;
+        g_uota_done = true;
+        k_sleep(K_MSEC(300)); /* �ȴ����߳��˳� */
+    }
+
+    /* ɾ���� screen �ͷ��ڴ� */
+    if (g_uota_scr != NULL)
+    {
+        lv_obj_del(g_uota_scr);
+        g_uota_scr = NULL;
+    }
+
+    g_uota_scr = lv_obj_create(NULL);
+    g_uota_active = true;
+    g_uota_complete = false;
+    g_uota_failed = false;
+    g_uota_done = false;
+    g_uota_ui_finalized = false;
+    g_uota_state = UOTA_STATE_IDLE;
+    g_uota_progress_val = 0;
+    g_uota_error_code = 0;
+    memset(g_uota_error_msg, 0, sizeof(g_uota_error_msg));
+
+    /* ��ʼ�� OTA ����� */
+    ret = uota_server_init(&g_uota_server, NULL, 115200);
+    if (ret != 0)
+    {
+        LOG_ERR("uota_server_init failed: %d", ret);
+        g_uota_active = false;
+        return ret;
+    }
+
+    /* ���ûص� */
+    uota_server_set_state_cb(&g_uota_server, uota_state_callback);
+    uota_server_set_progress_cb(&g_uota_server, uota_progress_callback);
+    uota_server_set_error_cb(&g_uota_server, uota_error_callback);
+
+    /* ��ʾ���� */
+    show_uota_screen();
+    lv_scr_load(g_uota_scr);
+
+    /* ���� OTA �����߳� (���ȼ����� shell �� 7��ȷ�����õ���������) */
+    k_thread_create(&g_uota_thread_data,
+                    g_uota_thread_stack,
+                    K_THREAD_STACK_SIZEOF(g_uota_thread_stack),
+                    uota_thread_entry,
+                    NULL, NULL, NULL,
+                    5, 0, K_NO_WAIT);
+
+    LOG_INF("UART OTA started");
+    return 0;
+}
+
+/* LVGL �¼��ص���װ */
+void lvgl_uart_ota_start_cb(lv_event_t *e)
+{
+    lvgl_uart_ota_start();
+}
+
+void *lvgl_uart_ota_create_screen(void)
+{
+    lvgl_uart_ota_start();
+    return g_uota_scr;
+}
+
+void lvgl_uart_ota_set_back_to_menu_cb(lv_event_cb_t cb)
+{
+    g_uota_back_to_menu_cb = cb;
+}
+
+void lvgl_uart_ota_progress_refresh(void)
+{
+    if (g_uota_active)
+    {
+        uota_progress_ui_refresh();
+    }
+}
+
+bool lvgl_uart_ota_is_active(void)
+{
+    return g_uota_active;
+}

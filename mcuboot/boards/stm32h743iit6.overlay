@@ -1,0 +1,21 @@
+/*
+ * STM32H743IIT6 MCUboot Bootloader DeviceTree Overlay
+ *
+ * 分区布局与板级 DTS (stm32h743iit6.dts) 保持一致:
+ *   - Bootloader: 0x00000000 - 0x00020000 (128KB)
+ *   - Storage: 0x00020000 - 0x00040000 (128KB)
+ *   - Slot 0: 0x00040000 - 0x00100000 (768KB, 主镜像)
+ *   - Slot 1: 0x00100000 - 0x001C0000 (768KB, 升级镜像)
+ *   - Scratch: 0x001C0000 - 0x001E0000 (128KB, swap 暂存)
+ *
+ * 注意: 分区已在板级 DTS 中定义，此 overlay 仅设置 chosen 节点
+ */
+
+/ {
+	chosen {
+		zephyr,console = &usart1;
+		zephyr,shell-uart = &usart1;
+		zephyr,code-partition = &boot_partition;
+	};
+};
+

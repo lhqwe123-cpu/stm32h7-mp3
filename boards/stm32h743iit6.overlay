@@ -1,0 +1,97 @@
+/ {
+	chosen {
+		zephyr,console = &usart1;
+		zephyr,shell-uart = &usart1;
+		zephyr,display = &ltdc;
+	};
+
+	aliases {
+		led0 = &user_led0;
+	};
+
+	leds {
+		compatible = "gpio-leds";
+
+		user_led0: led_0 {
+			gpios = <&gpioh 4 GPIO_ACTIVE_HIGH>;
+			label = "LED0";
+		};
+	};
+
+	/* MDMA 中断保留 (JPEG 硬件解码使用) */
+	mdma_irq_reserve {
+		compatible = "zephyr,user";
+		interrupt-parent = <&nvic>;
+		interrupts = <122 0>;
+		status = "okay";
+	};
+};
+
+&usart3 {
+	pinctrl-0 = <&usart3_tx_pb10 &usart3_rx_pb11>;
+
+	pinctrl-names = "default";
+	current-speed = <115200>;
+	dmas = <&dmamux1 0 46 STM32_DMA_PERIPH_TX>,
+		   <&dmamux1 1 45 (STM32_DMA_PERIPH_RX | STM32_DMA_MODE_CYCLIC)>;
+	dma-names = "tx", "rx";
+	status = "okay";
+};
+
+&dma1 {
+	status = "okay";
+};
+
+&dmamux1 {
+	status = "okay";
+};
+
+&sdmmc1 {
+	status = "okay";
+	pinctrl-0 = <&sdmmc1_d0_pc8 &sdmmc1_d1_pc9
+				 &sdmmc1_d2_pc10 &sdmmc1_d3_pc11
+				 &sdmmc1_ck_pc12 &sdmmc1_cmd_pd2>;
+	pinctrl-names = "default";
+
+	bus-width = <4>;
+	clk-div = <2>;
+	disk-name = "SD";
+};
+
+&ltdc {
+	pinctrl-0 = <&ltdc_r0_pg13 &ltdc_r1_pa2 &ltdc_r2_ph8 &ltdc_r3_ph9
+				 &ltdc_r4_ph10 &ltdc_r5_ph11 &ltdc_r6_ph12 &ltdc_r7_pg6
+				 &ltdc_g0_pe5 &ltdc_g1_pe6 &ltdc_g2_ph13 &ltdc_g3_ph14
+				 &ltdc_g4_ph15 &ltdc_g5_pi0 &ltdc_g6_pi1 &ltdc_g7_pi2
+				 &ltdc_b0_pg14 &ltdc_b1_pg12 &ltdc_b2_pd6 &ltdc_b3_pa8
+				 &ltdc_b4_pi4 &ltdc_b5_pi5 &ltdc_b6_pi6 &ltdc_b7_pi7
+				 &ltdc_clk_pg7 &ltdc_hsync_pi10 &ltdc_vsync_pi9 &ltdc_de_pf10>;
+	pinctrl-names = "default";
+	bl-ctrl-gpios = <&gpiod 12 GPIO_ACTIVE_HIGH>;
+	ext-sdram = <&sdram1>;
+	clocks = <&rcc STM32_CLOCK(APB3, 3)>, <&rcc STM32_SRC_PLL3_R NO_SEL>;
+	status = "okay";
+
+	width = <800>;
+	height = <480>;
+	pixel-format = <PANEL_PIXEL_FORMAT_RGB_888>;
+
+	display-timings {
+		compatible = "zephyr,panel-timing";
+		hsync-len = <48>;
+		hback-porch = <88>;
+		hfront-porch = <40>;
+		vsync-len = <3>;
+		vback-porch = <32>;
+		vfront-porch = <13>;
+		hsync-active = <0>;
+		vsync-active = <0>;
+		de-active = <0>;
+		pixelclk-active = <0>;
+	};
+
+	def-back-color-red = <0x00>;
+	def-back-color-green = <0x00>;
+	def-back-color-blue = <0xff>;
+};
+

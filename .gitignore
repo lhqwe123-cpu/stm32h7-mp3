@@ -1,0 +1,55 @@
+# Python virtual env
+.venv/
+
+# External dependencies
+external
+
+# All build outputs
+**/build*/
+build/
+mcuboot/build/
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Compiled objects
+*.o
+*.obj
+*.elf
+*.bin
+*.hex
+*.map
+*.lst
+
+# MCUboot private keys (keep secret!)
+mcuboot/keys/*.pem
+
+# Temporary / backup files
+*.tmp
+*.bak
+*.log
+
+# Zephyr generated
+zephyr_modules.txt
+sysbuild_modules.txt
+compile_commands.json
+
+# Keil / IDE packs
+.pack/
+
+# Build info
+build_info.yml
+build_info.yml.bak
