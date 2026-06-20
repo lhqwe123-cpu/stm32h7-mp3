@@ -14,7 +14,7 @@
 |------|------|
 | 固件版本 | v0.1-beta |
 | 发布日期 | 2026-06 |
-| Zephyr 版本 | 3.x (LTS) |
+| Zephyr 版本 | 4.4.99 |
 | LVGL 版本 | v9.x |
 | MCUboot 版本 | 最新稳定版 |
 | 目标平台 | STM32H743IIT6 (Cortex-M7, 480MHz) |
