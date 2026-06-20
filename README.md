@@ -149,8 +149,7 @@ mp3/
 | 组件 | 型号 / 规格 |
 |------|------------|
 | 主控 MCU | STM32H743IIT6 (Cortex-M7, 480MHz, 2MB Flash, 1MB RAM) |
-| 外部 SDRAM | 待填写 |
-| 外部 Flash | 待填写 |
+| 外部 SDRAM | W9825G6KH |
 | 显示屏 | 7寸 RGB565 LCD, 800×480 |
 | 触摸控制器 | GT1151Q (I2C) |
 | SD 卡槽 | SDMMC1, 4-bit 模式 |
@@ -165,11 +164,11 @@ mp3/
 
 | 项目 | 详情 |
 |------|------|
-| PCB 版本 | 待填写 |
+| PCB 版本 | v0.1-beta |
 | 设计工具 | 嘉立创 EDA（LCEDA） |
 | PCB 工程文件 | `hardware/stm32h7手持mp3.eprj` |
 | 原理图预览 | `hardware/原理图.png` |
-| 备注 | 待填写 |
+| 备注 | 当前仅作功能验证阶段，非最终pcb设计 |
 
 ---
 
