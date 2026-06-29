@@ -3,6 +3,8 @@
 		zephyr,console = &usart1;
 		zephyr,shell-uart = &usart1;
 		zephyr,display = &ltdc;
+		zephyr,itcm = &itcm;
+		zephyr,dtcm = &dtcm;
 	};
 
 	aliases {

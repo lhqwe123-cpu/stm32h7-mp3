@@ -17,6 +17,7 @@
  */
 
 #include "mcuboot_upgrade.h"
+#include "delta_patch.h"
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
@@ -29,6 +30,8 @@
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
+
+#include "my_malloc.h" /* mymalloc/myfree 从 SDRAM 分配 */
 
 LOG_MODULE_REGISTER(mcuboot_upgrade, LOG_LEVEL_INF);
 
@@ -209,6 +212,15 @@ int mcuboot_upgrade_perform(const char *path,
         return -EINVAL;
     }
 
+    /* ---- 检测是否为差分升级包 ---- */
+    if (header->type == FWPKG_TYPE_DELTA)
+    {
+        LOG_INF("Delta OTA package detected!");
+        return mcuboot_upgrade_perform_delta(path, header, cb, user_data);
+    }
+
+    /* ---- 全量升级路径 (原有逻辑) ---- */
+
     /* ---- 1. 获取 slot 1 信息 ---- */
     ret = flash_area_open(PARTITION_ID(slot1_partition), &fa);
     if (ret != 0)
@@ -326,6 +338,183 @@ int mcuboot_upgrade_perform(const char *path,
     }
 
     LOG_INF("Upgrade requested! Reboot to complete.");
+    notify_progress(cb, user_data, UPGRADE_STATE_PENDING_REBOOT, 100);
+
+    return 0;
+}
+
+/* ============================================================
+ * 差分升级执行 (Delta OTA)
+ * ============================================================ */
+
+/** 差分还原进度回调适配 */
+static void delta_upgrade_progress_cb(uint8_t progress, void *user_data)
+{
+    /* user_data 是 upgrade_progress_cb_t */
+    upgrade_progress_cb_t cb = (upgrade_progress_cb_t)user_data;
+    if (cb)
+    {
+        cb(UPGRADE_STATE_WRITING, progress, NULL);
+    }
+}
+
+int mcuboot_upgrade_perform_delta(const char *path,
+                                  const fwpkg_header_t *header,
+                                  upgrade_progress_cb_t cb,
+                                  void *user_data)
+{
+    struct fs_file_t file;
+    uint8_t *patch_buf = NULL;
+    uint32_t patch_size;
+    ssize_t rd;
+    int ret;
+
+    LOG_INF("=== Delta OTA Upgrade ===");
+    LOG_INF("Base version: %u.%u.%u.%u",
+            header->base_version[0], header->base_version[1],
+            header->base_version[2], header->base_version[3]);
+
+    /* 1. 校验当前运行版本是否匹配 base_version */
+    uint32_t running_ver = 0;
+    if (mcuboot_upgrade_get_running_version(&running_ver) == 0)
+    {
+        uint32_t base_ver = ((uint32_t)header->base_version[0] << 24) |
+                            ((uint32_t)header->base_version[1] << 16) |
+                            ((uint32_t)header->base_version[2] << 8) |
+                            header->base_version[3];
+        if (running_ver != base_ver)
+        {
+            LOG_ERR("Version mismatch! Running: %u.%u.%u.%u, Base: %u.%u.%u.%u",
+                    (running_ver >> 24) & 0xFF, (running_ver >> 16) & 0xFF,
+                    (running_ver >> 8) & 0xFF, running_ver & 0xFF,
+                    header->base_version[0], header->base_version[1],
+                    header->base_version[2], header->base_version[3]);
+            notify_progress(cb, user_data, UPGRADE_STATE_FAILED, 0);
+            return -EINVAL;
+        }
+        LOG_INF("Base version matches running firmware");
+    }
+    else
+    {
+        LOG_WRN("Cannot read running version, skip version check");
+    }
+
+    /* 2. 读取补丁数据到 RAM */
+    patch_size = header->image_size;
+    LOG_INF("Patch size: %u bytes", patch_size);
+
+    patch_buf = (uint8_t *)mymalloc(SRAMEX, patch_size);
+    if (!patch_buf)
+    {
+        LOG_ERR("Failed to allocate %u bytes for patch", patch_size);
+        notify_progress(cb, user_data, UPGRADE_STATE_FAILED, 0);
+        return -ENOMEM;
+    }
+
+    fs_file_t_init(&file);
+    ret = fs_open(&file, path, FS_O_READ);
+    if (ret != 0)
+    {
+        LOG_ERR("Cannot open fwpkg (err: %d)", ret);
+        myfree(SRAMEX, patch_buf);
+        notify_progress(cb, user_data, UPGRADE_STATE_FAILED, 0);
+        return ret;
+    }
+
+    /* 跳过头部 */
+    ret = fs_seek(&file, FWPKG_HEADER_SIZE, FS_SEEK_SET);
+    if (ret != 0)
+    {
+        LOG_ERR("Seek past header failed (err: %d)", ret);
+        fs_close(&file);
+        myfree(SRAMEX, patch_buf);
+        notify_progress(cb, user_data, UPGRADE_STATE_FAILED, 0);
+        return ret;
+    }
+
+    rd = fs_read(&file, patch_buf, patch_size);
+    fs_close(&file);
+
+    if (rd != (ssize_t)patch_size)
+    {
+        LOG_ERR("Read patch failed: %d / %u", (int)rd, patch_size);
+        myfree(SRAMEX, patch_buf);
+        notify_progress(cb, user_data, UPGRADE_STATE_FAILED, 0);
+        return -EIO;
+    }
+
+    LOG_INF("Patch data loaded to RAM");
+
+    /* 3. 获取 slot0 地址和大小 */
+    const struct flash_area *fa_slot0;
+    ret = flash_area_open(PARTITION_ID(slot0_partition), &fa_slot0);
+    if (ret != 0)
+    {
+        LOG_ERR("Cannot open slot0 (err: %d)", ret);
+        myfree(SRAMEX, patch_buf);
+        notify_progress(cb, user_data, UPGRADE_STATE_FAILED, 0);
+        return ret;
+    }
+
+    uint32_t slot0_addr = fa_slot0->fa_off;
+    uint32_t slot0_size = fa_slot0->fa_size;
+    flash_area_close(fa_slot0);
+
+    /* 4. 获取 slot1 地址和大小 */
+    const struct flash_area *fa_slot1;
+    ret = flash_area_open(PARTITION_ID(slot1_partition), &fa_slot1);
+    if (ret != 0)
+    {
+        LOG_ERR("Cannot open slot1 (err: %d)", ret);
+        myfree(SRAMEX, patch_buf);
+        notify_progress(cb, user_data, UPGRADE_STATE_FAILED, 0);
+        return ret;
+    }
+
+    uint32_t slot1_addr = fa_slot1->fa_off;
+    uint32_t slot1_size = fa_slot1->fa_size;
+    flash_area_close(fa_slot1);
+
+    /* 5. 执行差分还原 (delta_patch_apply 内部自行分配工作缓冲区) */
+    notify_progress(cb, user_data, UPGRADE_STATE_ERASING, 0);
+
+    delta_config_t dcfg = {
+        .old_image_addr = slot0_addr,
+        .old_image_size = slot0_size,
+        .patch_data = patch_buf,
+        .patch_size = patch_size,
+        .new_image_addr = slot1_addr,
+        .new_image_max_size = slot1_size,
+        .work_buffer = NULL, /* 让 delta_patch_apply 自行分配 */
+        .work_buffer_size = 0,
+        .progress_cb = delta_upgrade_progress_cb,
+        .user_data = (void *)cb,
+    };
+
+    ret = delta_patch_apply(&dcfg);
+
+    myfree(SRAMEX, patch_buf);
+
+    if (ret != 0)
+    {
+        LOG_ERR("Delta patch apply failed: %d", ret);
+        notify_progress(cb, user_data, UPGRADE_STATE_FAILED, 0);
+        return ret;
+    }
+
+    /* 7. 请求 MCUboot 升级 */
+    LOG_INF("Requesting MCUboot upgrade...");
+    notify_progress(cb, user_data, UPGRADE_STATE_REQUESTING, 98);
+
+    ret = boot_request_upgrade(BOOT_UPGRADE_TEST);
+    if (ret != 0)
+    {
+        LOG_ERR("Upgrade request failed (err: %d)", ret);
+        notify_progress(cb, user_data, UPGRADE_STATE_FAILED, 0);
+        return UPGRADE_RESULT_REQUEST_FAILED;
+    }
+
+    LOG_INF("Delta upgrade requested! Reboot to complete.");
     notify_progress(cb, user_data, UPGRADE_STATE_PENDING_REBOOT, 100);
 
     return 0;

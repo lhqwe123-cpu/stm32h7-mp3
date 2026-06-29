@@ -57,6 +57,10 @@ extern "C"
 /** SD 卡固件包扫描目录 */
 #define FWPKG_SCAN_DIR "/SD:/FIRMWARE"
 
+/** 固件包类型 */
+#define FWPKG_TYPE_FULL 0x00
+#define FWPKG_TYPE_DELTA 0x01
+
     /* ============================================================
      * 升级状态枚举
      * ============================================================ */
@@ -143,6 +147,23 @@ extern "C"
                                 const fwpkg_header_t *header,
                                 upgrade_progress_cb_t cb,
                                 void *user_data);
+
+    /**
+     * @brief 执行差分固件升级流程 (Delta OTA)
+     *
+     * 使用 HDiffPatch 将补丁应用到 slot0 的旧固件上，
+     * 生成新固件写入 slot1。
+     *
+     * @param path     固件包文件路径
+     * @param header   固件包头部信息 (type 必须为 FWPKG_TYPE_DELTA)
+     * @param cb       进度回调 (可为 NULL)
+     * @param user_data 用户数据 (可为 NULL)
+     * @return 0 成功, 负值失败
+     */
+    int mcuboot_upgrade_perform_delta(const char *path,
+                                      const fwpkg_header_t *header,
+                                      upgrade_progress_cb_t cb,
+                                      void *user_data);
 
     /**
      * @brief 确认当前运行的固件

@@ -26,6 +26,8 @@ import hashlib
 
 FWPKG_MAGIC = 0x4B505746  # "FWPK" little-endian
 FWPKG_HEADER_SIZE = 64
+FWPKG_TYPE_FULL = 0x00
+FWPKG_TYPE_DELTA = 0x01
 
 
 def parse_version(version_str: str) -> int:
@@ -71,14 +73,16 @@ def pack_fwpkg(image_path: str, version: int, output_path: str) -> None:
     # Calculate SHA256 hash of the image
     image_hash = hashlib.sha256(image_data).digest()
 
-    # Build header
+    # Build header (new 64-byte format with type field)
     header = struct.pack(
-        "<II I 32s 20s",
+        "<I I I 32s B 4B 15s",
         FWPKG_MAGIC,        # magic
         version,            # version
         image_size,         # image_size
         image_hash,         # image_hash (32 bytes)
-        b'\x00' * 20,       # reserved (20 bytes)
+        FWPKG_TYPE_FULL,    # type = FULL
+        0, 0, 0, 0,         # base_version (unused for full)
+        b'\x00' * 15,       # reserved (15 bytes)
     )
 
     assert len(header) == FWPKG_HEADER_SIZE, \
@@ -106,8 +110,8 @@ def unpack_fwpkg(fwpkg_path: str, output_image_path: str) -> None:
         if len(header_data) < FWPKG_HEADER_SIZE:
             raise ValueError("File too small to be a valid .fwpkg")
 
-        magic, version, image_size, image_hash, _ = struct.unpack(
-            "<II I 32s 20s", header_data
+        magic, version, image_size, image_hash, pkg_type, b0, b1, b2, b3, _ = struct.unpack(
+            "<I I I 32s B 4B 15s", header_data
         )
 
         if magic != FWPKG_MAGIC:
@@ -195,8 +199,8 @@ def main():
                 if len(header_data) < FWPKG_HEADER_SIZE:
                     raise ValueError("File too small")
 
-                magic, version, image_size, image_hash, _ = struct.unpack(
-                    "<II I 32s 20s", header_data
+                magic, version, image_size, image_hash, pkg_type, b0, b1, b2, b3, _ = struct.unpack(
+                    "<I I I 32s B 4B 15s", header_data
                 )
 
                 if magic != FWPKG_MAGIC:

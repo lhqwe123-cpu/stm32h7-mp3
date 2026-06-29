@@ -41,6 +41,10 @@ extern "C"
 /** 固件包扫描默认目录 */
 #define FWPKG_DEFAULT_DIR "/SD:/FIRMWARE"
 
+/** 固件包类型 */
+#define FWPKG_TYPE_FULL 0x00  /**< 全量固件 */
+#define FWPKG_TYPE_DELTA 0x01 /**< 差分补丁 */
+
     /* ============================================================
      * 数据结构
      * ============================================================ */
@@ -48,11 +52,13 @@ extern "C"
     /** 固件包头部 */
     typedef struct
     {
-        uint32_t magic;         /**< 魔数, 必须为 FWPKG_MAGIC_VAL */
-        uint32_t version;       /**< 版本号 (major<<24|minor<<16|rev<<8|build) */
-        uint32_t image_size;    /**< 固件镜像大小 (字节) */
-        uint8_t image_hash[32]; /**< SHA256 哈希值 */
-        uint8_t reserved[20];   /**< 保留字段 */
+        uint32_t magic;          /**< 魔数, 必须为 FWPKG_MAGIC_VAL */
+        uint32_t version;        /**< 版本号 (major<<24|minor<<16|rev<<8|build) */
+        uint32_t image_size;     /**< 固件镜像大小 (字节) */
+        uint8_t image_hash[32];  /**< SHA256 哈希值 */
+        uint8_t type;            /**< 固件类型: 0=全量, 1=差分 */
+        uint8_t base_version[4]; /**< 差分基准版本 (差分时有效) */
+        uint8_t reserved[15];    /**< 保留字段 */
     } fwpkg_header_t;
 
     /** 固件包信息 (解析后的完整信息) */

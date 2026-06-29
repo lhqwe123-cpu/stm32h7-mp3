@@ -53,3 +53,8 @@ compile_commands.json
 # Build info
 build_info.yml
 build_info.yml.bak
+
+# Large binary files (>100MB, use Git LFS or external storage)
+sd/VIDEO/*.avi
+sd/VIDEO/*.mp4
+sd/VIDEO/*.mkv
